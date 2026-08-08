@@ -1,0 +1,40 @@
+# Env / secrets
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DB
+*.sqlite3
+*.db
+backend/examine.db
+postgres-data/
+redis-data/
+
+# IDE
+.vscode/
+.idea/
+.claude/settings.local.json
+
+# token-scanner
+token-scanner/.venv/
+token-scanner/positions.json

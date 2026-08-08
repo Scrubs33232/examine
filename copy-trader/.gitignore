@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+bot-wallet.enc.json
+target-wallets.json
+settings.json
+ledger.json
+*.log
