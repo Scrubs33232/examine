@@ -41,6 +41,59 @@ export interface EditableSettings {
   stopLossPct: number; // sell a position once it's down this many % from cost basis
   takeProfitEnabled: boolean;
   takeProfitPct: number; // sell a position once it's up this many % from cost basis
+
+  /** Trailing stop: exits once price drops this many % from the position's
+   * highest observed value since entry, rather than from a fixed cost
+   * basis. Independent of (and checked before) the static stopLoss above —
+   * whichever fires first wins for a given tick. */
+  trailingStopEnabled: boolean;
+  trailingStopPct: number;
+
+  /** Take-profit laddering: partial exits at increasing ROI targets (e.g.
+   * 25% of the position at +100%, another 25% at +200%), instead of one
+   * all-or-nothing take-profit. Each rung fires at most once per position
+   * (tracked in positionState.ts). Stored as JSON since it's a list, not a
+   * scalar — validated in validate() below (roiPct > 0, 0 < exitPct <= 100,
+   * sorted ascending, max 10 rungs). Independent of takeProfitEnabled
+   * above, which remains as a simple full-exit fallback. */
+  takeProfitLaddersEnabled: boolean;
+  takeProfitLadders: { roiPct: number; exitPct: number }[];
+
+  /** Time-based liquidation: force-exits a position if it hasn't reached
+   * timeLimitMinRoiPct within timeLimitMinutes of the first fill — prevents
+   * slow-bleed holding a target that's gone quiet on a token that's just
+   * drifting. */
+  timeLimitEnabled: boolean;
+  timeLimitMinutes: number;
+  timeLimitMinRoiPct: number;
+
+  /** "proportional" (default, existing behavior): min(% of spendable
+   * balance, buySolCap). "fixed": always spend buySolCap (subject only to
+   * the priority multiplier and available balance) — a fixed $-equivalent
+   * ticket size per trade instead of scaling with the target's own size. */
+  positionSizingMode: "proportional" | "fixed";
+
+  /** FOMO/momentum validation gate (momentum.ts) — run on every detected
+   * buy before it's sized/executed. Off by default: it depends on
+   * Dexscreener having an indexed pair for the mint, which brand-new
+   * pre-migration pump.fun bonding-curve tokens usually don't have yet (see
+   * momentum.ts and the README for the tradeoff this implies). */
+  fomoValidationEnabled: boolean;
+  /** Which Dexscreener window price velocity/volume surge are computed
+   * over. "m5" reacts faster; "h1" is less noisy. */
+  momentumWindow: "m5" | "h1";
+  minPriceChangePct: number; // required % move over momentumWindow
+  minVolumeSurgeMultiple: number; // current 5-min volume rate vs. its own hourly average
+  minLiquidityUsd: number;
+  maxSellTaxBps: number; // Token-2022 transfer-fee extension ceiling, in basis points
+  momentumValidationTimeoutMs: number; // hard budget for the whole check (spec: <1.5s)
+  /** What to do when Dexscreener has no pair for the mint at all (distinct
+   * from "has a pair but it fails a threshold"). false = skip the buy
+   * (safe default — "don't buy blindly"). true = let it through unvalidated
+   * — only sensible if you're deliberately copy-trading pre-migration
+   * pump.fun bonding-curve entries, where no aggregator has indexed a pair
+   * yet by definition. */
+  momentumFailOpenOnNoData: boolean;
 }
 
 function seedFromConfig(): EditableSettings {
@@ -67,6 +120,30 @@ function seedFromConfig(): EditableSettings {
     stopLossPct: 25,
     takeProfitEnabled: false,
     takeProfitPct: 100,
+
+    trailingStopEnabled: false,
+    trailingStopPct: 20,
+
+    takeProfitLaddersEnabled: false,
+    takeProfitLadders: [
+      { roiPct: 100, exitPct: 25 },
+      { roiPct: 200, exitPct: 25 },
+    ],
+
+    timeLimitEnabled: false,
+    timeLimitMinutes: 60,
+    timeLimitMinRoiPct: 10,
+
+    positionSizingMode: "proportional",
+
+    fomoValidationEnabled: false,
+    momentumWindow: "m5",
+    minPriceChangePct: 5,
+    minVolumeSurgeMultiple: 3,
+    minLiquidityUsd: 3000,
+    maxSellTaxBps: 500,
+    momentumValidationTimeoutMs: 1500,
+    momentumFailOpenOnNoData: false,
   };
 }
 
@@ -115,6 +192,40 @@ function validate(input: Partial<EditableSettings>): Partial<EditableSettings> {
   if (isFiniteNumber(input.stopLossPct)) out.stopLossPct = clamp(input.stopLossPct, 1, 100);
   if (input.takeProfitEnabled !== undefined) out.takeProfitEnabled = Boolean(input.takeProfitEnabled);
   if (isFiniteNumber(input.takeProfitPct)) out.takeProfitPct = clamp(input.takeProfitPct, 1, 10_000);
+
+  if (input.trailingStopEnabled !== undefined) out.trailingStopEnabled = Boolean(input.trailingStopEnabled);
+  if (isFiniteNumber(input.trailingStopPct)) out.trailingStopPct = clamp(input.trailingStopPct, 1, 100);
+
+  if (input.takeProfitLaddersEnabled !== undefined) out.takeProfitLaddersEnabled = Boolean(input.takeProfitLaddersEnabled);
+  if (Array.isArray(input.takeProfitLadders)) {
+    const rungs = input.takeProfitLadders
+      .filter(
+        (r): r is { roiPct: number; exitPct: number } =>
+          !!r && isFiniteNumber((r as { roiPct: unknown }).roiPct) && isFiniteNumber((r as { exitPct: unknown }).exitPct)
+      )
+      .map((r) => ({ roiPct: clamp(r.roiPct, 1, 100_000), exitPct: clamp(r.exitPct, 1, 100) }))
+      .sort((a, b) => a.roiPct - b.roiPct)
+      .slice(0, 10);
+    if (rungs.length > 0) out.takeProfitLadders = rungs;
+  }
+
+  if (input.timeLimitEnabled !== undefined) out.timeLimitEnabled = Boolean(input.timeLimitEnabled);
+  if (isFiniteNumber(input.timeLimitMinutes)) out.timeLimitMinutes = clamp(Math.round(input.timeLimitMinutes), 1, 43_200);
+  if (isFiniteNumber(input.timeLimitMinRoiPct)) out.timeLimitMinRoiPct = clamp(input.timeLimitMinRoiPct, -100, 100_000);
+
+  if (input.positionSizingMode === "proportional" || input.positionSizingMode === "fixed") {
+    out.positionSizingMode = input.positionSizingMode;
+  }
+
+  if (input.fomoValidationEnabled !== undefined) out.fomoValidationEnabled = Boolean(input.fomoValidationEnabled);
+  if (input.momentumWindow === "m5" || input.momentumWindow === "h1") out.momentumWindow = input.momentumWindow;
+  if (isFiniteNumber(input.minPriceChangePct)) out.minPriceChangePct = clamp(input.minPriceChangePct, 0, 10_000);
+  if (isFiniteNumber(input.minVolumeSurgeMultiple)) out.minVolumeSurgeMultiple = clamp(input.minVolumeSurgeMultiple, 0, 1000);
+  if (isFiniteNumber(input.minLiquidityUsd)) out.minLiquidityUsd = clamp(input.minLiquidityUsd, 0, 100_000_000);
+  if (isFiniteNumber(input.maxSellTaxBps)) out.maxSellTaxBps = clamp(Math.round(input.maxSellTaxBps), 0, 10_000);
+  if (isFiniteNumber(input.momentumValidationTimeoutMs)) out.momentumValidationTimeoutMs = clamp(Math.round(input.momentumValidationTimeoutMs), 100, 10_000);
+  if (input.momentumFailOpenOnNoData !== undefined) out.momentumFailOpenOnNoData = Boolean(input.momentumFailOpenOnNoData);
+
   return out;
 }
 

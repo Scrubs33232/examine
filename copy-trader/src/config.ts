@@ -51,6 +51,7 @@ export const config = {
     .filter(Boolean),
   targetWalletsPath: process.env.TARGET_WALLETS_PATH || "./target-wallets.json",
   ledgerPath: process.env.LEDGER_PATH || "./ledger.json",
+  positionStatePath: process.env.POSITION_STATE_PATH || "./position-state.json",
 
   /** Trading-parameter env vars below (DRY_RUN, BUY_SOL_CAP, SLIPPAGE_BPS,
    * etc.) are used only to seed settings.json on first boot — after that,
@@ -90,6 +91,13 @@ export const config = {
    * the control API existed. Set false to boot idle and require an explicit
    * POST /api/start (e.g. from the website's Start button). */
   autoStart: boolFlag("AUTO_START", true),
+
+  /** Optional trade-alert webhooks. Credentials, so they live in .env like
+   * the RPC/key config above, not in settingsStore (which is UI-editable and
+   * gitignored-but-plaintext). Either or both may be left blank. */
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
+  discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL || "",
 };
 
 if (config.buyPortfolioPercent < 0 || config.buyPortfolioPercent > 1) {

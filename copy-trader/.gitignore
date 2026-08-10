@@ -5,4 +5,5 @@ bot-wallet.enc.json
 target-wallets.json
 settings.json
 ledger.json
+position-state.json
 *.log

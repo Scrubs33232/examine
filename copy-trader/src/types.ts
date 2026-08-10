@@ -42,6 +42,22 @@ export interface SizedOrder {
   priorityMultiplier: number;
 }
 
+/** Result of the pre-trade FOMO/momentum validation engine (see momentum.ts)
+ * — run only for buy-side mirrors, before sizing/execution. `metrics` is
+ * populated best-effort even on failure/timeout, for logging. */
+export interface FomoValidationResult {
+  pass: boolean;
+  reason: string;
+  metrics: {
+    priceChangePct: number | null;
+    volumeSurgeMultiple: number | null;
+    liquidityUsd: number | null;
+    sellTaxBps: number | null;
+    dataSource: "dexscreener" | "unavailable";
+  };
+  elapsedMs: number;
+}
+
 export interface ExecutionResult {
   success: boolean;
   signature?: string;

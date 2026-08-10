@@ -22,6 +22,9 @@ import { TargetWalletListener } from "./listener.js";
 import { sizeOrder } from "./calculator.js";
 import { Executor } from "./executor.js";
 import { TargetWalletStore } from "./targetWalletStore.js";
+import { validateFomo } from "./momentum.js";
+import { positionStateStore } from "./positionState.js";
+import { notifyTradeExecuted, notifyTradeSkipped, notifyExit, notifyError } from "./notifier.js";
 import type { SizedOrder, TargetTradeEvent } from "./types.js";
 
 export type BotStatus = "stopped" | "running" | "error";
@@ -138,6 +141,7 @@ export class BotController extends EventEmitter {
       this.handleTrade(event).catch((err) => {
         this.lastError = (err as Error).message;
         this.pushEvent("error", `failed to process trade event: ${(err as Error).message}`);
+        notifyError(`failed to process trade event on ${event.mint}: ${(err as Error).message}`);
       });
     });
     listener.start();
@@ -199,7 +203,8 @@ export class BotController extends EventEmitter {
     if (!this.positionMonitorTimer) {
       this.positionMonitorTimer = setInterval(() => {
         this.checkPositions().catch((err) => {
-          this.pushEvent("error", `stop-loss/take-profit check failed: ${(err as Error).message}`);
+          this.pushEvent("error", `position exit check failed: ${(err as Error).message}`);
+          notifyError(`position exit check failed: ${(err as Error).message}`);
         });
       }, POSITION_CHECK_INTERVAL_MS);
     }
@@ -224,6 +229,22 @@ export class BotController extends EventEmitter {
       dex: event.dex,
       direction: event.direction,
     });
+
+    // FOMO/momentum validation gate — buy-side only (see momentum.ts). A
+    // target's sell should never be blocked by momentum thresholds; exiting
+    // is about following the target out, not chasing a trend.
+    if (event.direction === "buy" && settingsStore.get().fomoValidationEnabled) {
+      const validation = await validateFomo(this.connection, event.mint);
+      this.pushEvent("sizing", `FOMO check (${validation.elapsedMs}ms): ${validation.reason}`, {
+        mint: event.mint,
+        pass: validation.pass,
+        ...validation.metrics,
+      });
+      if (!validation.pass) {
+        notifyTradeSkipped({ mint: event.mint, sourceWallet: event.sourceWallet, reason: validation.reason });
+        return;
+      }
+    }
 
     const [solBalance, tokenBalance] = await Promise.all([
       getSolBalance(this.connection, this.wallet.publicKey),
@@ -274,6 +295,16 @@ export class BotController extends EventEmitter {
           );
         }
       }
+
+      notifyTradeExecuted({
+        direction: order.direction,
+        mint: order.mint,
+        dex: order.dex,
+        sourceWallet: order.sourceWallet,
+        signature: result.signature,
+        solAmount: result.actualSolLamports !== undefined ? Number(result.actualSolLamports) / 1e9 : undefined,
+        dryRun: settingsStore.get().dryRun,
+      });
     } else {
       this.pushEvent("execution", `✗ blocked/failed: ${result.error}`, { mint: order.mint });
     }
@@ -308,49 +339,108 @@ export class BotController extends EventEmitter {
   /** Independent exit check, run on a timer while the bot is running (see
    * start()/stop()) — this is the only exit path that doesn't depend on the
    * target wallet itself selling. Guarded against overlapping runs since a
-   * slow quote round-trip could otherwise outlast the next tick. */
+   * slow quote round-trip could otherwise outlast the next tick.
+   *
+   * Checks, in order, first-match-wins per position per tick (a position
+   * that fully exits via one mechanism skips the rest until next tick):
+   *   1. Trailing stop — drop from the position's peak value since entry.
+   *   2. Static stop-loss / full take-profit — vs. cost basis (legacy,
+   *      still the simplest full-exit config).
+   *   3. Take-profit laddering — one partial-exit rung per tick.
+   *   4. Time-based liquidation — hasn't hit target ROI within the window.
+   */
   private async checkPositions(): Promise<void> {
     if (this.checkingPositions) return;
     const settings = settingsStore.get();
-    if (!settings.stopLossEnabled && !settings.takeProfitEnabled) return;
+    const anyExitEnabled =
+      settings.stopLossEnabled ||
+      settings.takeProfitEnabled ||
+      settings.trailingStopEnabled ||
+      settings.takeProfitLaddersEnabled ||
+      settings.timeLimitEnabled;
+    if (!anyExitEnabled) return;
 
     this.checkingPositions = true;
     try {
       const positions = await this.getOpenPositionsWithPnl();
       for (const pos of positions) {
-        if (pos.unrealizedPnlPct === null) continue; // no quote this tick — try again next tick
+        if (pos.currentValueLamports === null || pos.unrealizedPnlPct === null) continue; // no quote this tick — try again next tick
+
+        const state = positionStateStore.observe(pos.sourceWallet, pos.mint, BigInt(pos.currentValueLamports));
+
+        if (settings.trailingStopEnabled) {
+          const peak = BigInt(state.peakValueLamports);
+          const current = BigInt(pos.currentValueLamports);
+          const dropFromPeakPct = peak > 0n ? (Number(peak - current) / Number(peak)) * 100 : 0;
+          if (dropFromPeakPct >= settings.trailingStopPct) {
+            await this.exitPosition(pos, "trailing-stop", 1, `${dropFromPeakPct.toFixed(1)}% below peak`);
+            continue;
+          }
+        }
 
         const hitStopLoss = settings.stopLossEnabled && pos.unrealizedPnlPct <= -settings.stopLossPct;
         const hitTakeProfit = settings.takeProfitEnabled && pos.unrealizedPnlPct >= settings.takeProfitPct;
-        if (!hitStopLoss && !hitTakeProfit) continue;
+        if (hitStopLoss || hitTakeProfit) {
+          const pctStr = `${pos.unrealizedPnlPct >= 0 ? "+" : ""}${pos.unrealizedPnlPct.toFixed(1)}% vs cost basis`;
+          await this.exitPosition(pos, hitStopLoss ? "stop-loss" : "take-profit", 1, pctStr);
+          continue;
+        }
 
-        await this.exitPosition(pos, hitStopLoss ? "stop-loss" : "take-profit");
+        if (settings.takeProfitLaddersEnabled) {
+          const nextRung = settings.takeProfitLadders.find(
+            (r) => pos.unrealizedPnlPct! >= r.roiPct && !state.takenLadderRungs.includes(r.roiPct)
+          );
+          if (nextRung) {
+            await this.exitPosition(
+              pos,
+              `take-profit-ladder(+${nextRung.roiPct}%)`,
+              nextRung.exitPct / 100,
+              `+${pos.unrealizedPnlPct.toFixed(1)}% hit the ${nextRung.roiPct}% rung — selling ${nextRung.exitPct}% of position`
+            );
+            positionStateStore.markRungTaken(pos.sourceWallet, pos.mint, nextRung.roiPct);
+            continue;
+          }
+        }
+
+        if (settings.timeLimitEnabled) {
+          const elapsedMinutes = (Date.now() - state.firstEntryAt) / 60_000;
+          if (elapsedMinutes >= settings.timeLimitMinutes && pos.unrealizedPnlPct < settings.timeLimitMinRoiPct) {
+            await this.exitPosition(
+              pos,
+              "time-limit",
+              1,
+              `${elapsedMinutes.toFixed(0)}min elapsed, only ${pos.unrealizedPnlPct.toFixed(1)}% (target ${settings.timeLimitMinRoiPct}%)`
+            );
+          }
+        }
       }
     } finally {
       this.checkingPositions = false;
     }
   }
 
-  /** Force-closes a position outside the normal mirror-a-target-sell path.
-   * Caps the sell to the wallet's actual on-chain balance for the mint —
-   * the ledger tracks cost basis per (sourceWallet, mint), but the bot only
-   * has one token account per mint, so if two target wallets both hold
-   * positions in the same mint the tracked amounts can exceed what's
-   * actually left to sell (e.g. after an earlier partial exit). Never
-   * oversell; worst case this position's exit is smaller than "full". */
-  private async exitPosition(pos: PositionSnapshot, label: "stop-loss" | "take-profit"): Promise<void> {
+  /** Force-closes some fraction of a position outside the normal
+   * mirror-a-target-sell path. Caps the sell to the wallet's actual
+   * on-chain balance for the mint — the ledger tracks cost basis per
+   * (sourceWallet, mint), but the bot only has one token account per mint,
+   * so if two target wallets both hold positions in the same mint the
+   * tracked amounts can exceed what's actually left to sell (e.g. after an
+   * earlier partial exit). Never oversell; worst case this exit is smaller
+   * than intended. `fraction` of 1 = full exit (clears trailing/ladder
+   * state for this position); less than 1 = partial (take-profit ladder). */
+  private async exitPosition(pos: PositionSnapshot, label: string, fraction: number, detail: string): Promise<void> {
     const trackedAmount = BigInt(pos.tokenRawAmount);
     const actualBalance = await getTokenBalance(this.connection, this.wallet.publicKey, new PublicKey(pos.mint));
-    const sellAmount = trackedAmount < actualBalance ? trackedAmount : actualBalance;
+    const available = trackedAmount < actualBalance ? trackedAmount : actualBalance;
+    const fractionBps = BigInt(Math.round(Math.min(Math.max(fraction, 0), 1) * 10_000));
+    const sellAmount = (available * fractionBps) / 10_000n;
     if (sellAmount <= 0n) return;
 
-    const pctStr = `${pos.unrealizedPnlPct! >= 0 ? "+" : ""}${pos.unrealizedPnlPct!.toFixed(1)}%`;
     const shortWallet = `${pos.sourceWallet.slice(0, 4)}…${pos.sourceWallet.slice(-4)}`;
-    this.pushEvent(
-      "trade-detected",
-      `${label} triggered on ${pos.mint} (${pctStr} vs cost basis, position from ${shortWallet})`,
-      { mint: pos.mint, sourceWallet: pos.sourceWallet }
-    );
+    this.pushEvent("trade-detected", `${label} triggered on ${pos.mint} (${detail}, position from ${shortWallet})`, {
+      mint: pos.mint,
+      sourceWallet: pos.sourceWallet,
+    });
 
     const order: SizedOrder = {
       direction: "sell",
@@ -360,10 +450,13 @@ export class BotController extends EventEmitter {
       tokenRawAmountIn: sellAmount,
       tokenDecimals: 0,
       priorityMultiplier: 1,
-      reason: `${label}: position ${pctStr} vs cost basis`,
+      reason: `${label}: ${detail}`,
     };
 
     this.pushEvent("sizing", order.reason, { mint: order.mint, direction: order.direction });
     await this.executeAndRecord(order);
+    notifyExit({ label, mint: pos.mint, sourceWallet: pos.sourceWallet, pnlPct: pos.unrealizedPnlPct ?? 0 });
+
+    if (fraction >= 1) positionStateStore.clear(pos.sourceWallet, pos.mint);
   }
 }

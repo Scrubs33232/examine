@@ -13,20 +13,35 @@ import type { SizedOrder, TargetTradeEvent } from "./types.js";
 const BPS_DENOMINATOR = 10_000n;
 
 /** How much SOL (lamports) to spend mirroring a target BUY, given the bot's
- * current SOL balance: min(portfolio-percent * priority multiplier, fixed
- * cap), minus a fee buffer. The cap is a hard ceiling regardless of the
- * multiplier — a good track record sizes you up toward the cap, never past it. */
+ * current SOL balance. Two modes (settingsStore.positionSizingMode):
+ *   - "proportional" (default): min(portfolio-percent * priority
+ *     multiplier, fixed cap), minus a fee buffer. The cap is a hard ceiling
+ *     regardless of the multiplier — a good track record sizes you up
+ *     toward the cap, never past it.
+ *   - "fixed": always spend buySolCap * priority multiplier (still capped
+ *     at buySolCap itself, and at whatever's actually spendable) — a fixed
+ *     ticket size per trade rather than one that scales with the target's
+ *     own position size or the bot's portfolio %. This is what the spec's
+ *     "fixed position sizing, not a 1:1 percentage copy" calls for. */
 export function calculateBuySize(botSolBalanceLamports: bigint, sourceWallet: string): bigint {
   const spendable = botSolBalanceLamports - settingsStore.feeBufferLamports;
   if (spendable <= 0n) return 0n;
 
   const multiplier = ledger.getPriorityMultiplier(sourceWallet);
-  const effectiveFraction = settingsStore.buyPortfolioFraction * multiplier;
-  const percentBps = BigInt(Math.round(effectiveFraction * 10_000));
-  const byPercent = (spendable * percentBps) / BPS_DENOMINATOR;
-
   const cap = settingsStore.buySolCapLamports;
-  const sized = byPercent < cap ? byPercent : cap;
+
+  let sized: bigint;
+  if (settingsStore.get().positionSizingMode === "fixed") {
+    const multiplierBps = BigInt(Math.round(multiplier * 10_000));
+    const scaled = (cap * multiplierBps) / BPS_DENOMINATOR;
+    sized = scaled < cap ? scaled : cap;
+  } else {
+    const effectiveFraction = settingsStore.buyPortfolioFraction * multiplier;
+    const percentBps = BigInt(Math.round(effectiveFraction * 10_000));
+    const byPercent = (spendable * percentBps) / BPS_DENOMINATOR;
+    sized = byPercent < cap ? byPercent : cap;
+  }
+
   return sized > spendable ? spendable : sized;
 }
 
@@ -62,6 +77,10 @@ export function sizeOrder(
     if (solIn <= 0n) return null;
     const settings = settingsStore.get();
     const multiplierNote = multiplier !== 1 ? ` (×${multiplier.toFixed(2)} priority for this wallet's track record)` : "";
+    const sizingNote =
+      settings.positionSizingMode === "fixed"
+        ? `fixed ${settings.buySolCap} SOL ticket${multiplierNote}`
+        : `${settings.buyPortfolioPercent.toFixed(0)}% of spendable balance${multiplierNote}, capped at ${settings.buySolCap} SOL`;
     return {
       direction: "buy",
       mint: event.mint,
@@ -70,7 +89,7 @@ export function sizeOrder(
       solLamportsIn: solIn,
       tokenDecimals: event.tokenDecimals,
       priorityMultiplier: multiplier,
-      reason: `mirroring buy: ${settings.buyPortfolioPercent.toFixed(0)}% of spendable balance${multiplierNote}, capped at ${settings.buySolCap} SOL (spending ${Number(solIn) / 1e9} SOL)`,
+      reason: `mirroring buy: ${sizingNote} (spending ${Number(solIn) / 1e9} SOL)`,
     };
   }
 

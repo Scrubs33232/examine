@@ -1,9 +1,13 @@
 # copy-trader
 
 Mirrors a target Solana wallet's Pump.fun/Raydium buys and sells, sized
-proportionally to the bot's own wallet, and executes them automatically —
-**no per-trade confirmation.** Read the whole "Before you run this with real
-money" section before funding the bot wallet.
+either proportionally to the bot's own wallet or as a fixed ticket per
+trade, and executes them automatically — **no per-trade confirmation.**
+Optionally gates buys behind a FOMO/momentum validation check (price
+velocity, volume surge, liquidity floor, mint/tax safety) and manages exits
+with stop-loss, trailing stop, take-profit laddering, and time-based
+liquidation. Read the whole "Before you run this with real money" section
+before funding the bot wallet.
 
 ## How it works
 
@@ -26,23 +30,71 @@ money" section before funding the bot wallet.
    your RPC.
 4. **`security.ts`** handles AES-256-GCM key encryption at rest and a
    startup balance-guard warning.
-5. **`bot.ts`** wraps 1–4 in a start/stop-able controller with a structured,
-   in-memory event log (trade detections, sizing decisions, execution
-   results) that both the terminal and the control API read from. While
-   running, it also polls open positions roughly every 15s for independent
-   **stop-loss / take-profit** — mirroring a target's own sells (via
-   `calculator.ts`) is the *only* other exit path, so a target that holds
-   long-term, goes quiet, or a token that rugs while they're still holding
-   would otherwise never get exited. Off by default; enable and set
-   thresholds from the website's Copy Trader settings panel.
-6. **`api.ts`** — a small unauthenticated local HTTP + SSE server
+5. **`momentum.ts`** — the **FOMO/momentum validation engine**. Runs on
+   every detected *buy* (never sells — see below), before it's sized or
+   executed, under a hard timeout (`momentumValidationTimeoutMs`, default
+   1500ms): price velocity and volume surge from Dexscreener's public
+   token-pairs API, a liquidity-depth floor, and a mint/freeze-authority +
+   Token-2022 transfer-fee ("tax") safety check. Off by default — see
+   "FOMO validation: the tradeoff" below before enabling it.
+6. **`bot.ts`** wraps 1–5 in a start/stop-able controller with a structured,
+   in-memory event log (trade detections, FOMO checks, sizing decisions,
+   execution results) that both the terminal and the control API read from.
+   While running, it also polls open positions roughly every 15s for
+   independent exits — mirroring a target's own sells (via `calculator.ts`)
+   is the *only other* exit path, so a target that holds long-term, goes
+   quiet, or a token that rugs while they're still holding would otherwise
+   never get exited:
+   - **Stop-loss / take-profit** — full exit vs. a fixed cost basis.
+   - **Trailing stop** — full exit on a % drop from the position's peak
+     value since entry, rather than from cost basis.
+   - **Take-profit laddering** — partial exits at increasing ROI targets
+     (e.g. 25% of the position at +100%, another 25% at +200%); each rung
+     fires at most once (tracked in `positionState.ts`).
+   - **Time-based liquidation** — force-exits a position that hasn't hit a
+     target ROI within a configured time window, to avoid slow-bleed
+     holding.
+
+   All off by default; enable and set thresholds from the website's Copy
+   Trader settings panel (or `PUT /api/settings` directly).
+7. **`positionState.ts`** persists the per-position state the exits above
+   need but `ledger.ts`'s fill replay doesn't track: first-entry time (for
+   the time limit), peak value (for the trailing stop), and which
+   take-profit ladder rungs have already fired.
+8. **`notifier.ts`** — optional, independent Telegram/Discord webhook
+   alerts on trade execution, FOMO skips, and exits. Fire-and-forget; a
+   notification failure never affects trading.
+9. **`api.ts`** — a small unauthenticated local HTTP + SSE server
    (`GET /api/status`, `GET /api/trades`, `POST /api/start`, `POST
    /api/stop`, `GET /api/stream`) that backs the website's **Copy Trader**
    page (`/copy-trader` in the frontend). Not authenticated, same as the
    rest of this app's local dev servers — don't expose `API_PORT` beyond
    localhost without adding auth first, since `/api/start` puts real funds
    at risk.
-7. **`index.ts`** wires it all together and boots the API server.
+10. **`index.ts`** wires it all together and boots the API server.
+
+### FOMO validation: the tradeoff
+
+`momentum.ts` reads price/volume/liquidity from Dexscreener's public API,
+which only has data for tokens with an **indexed AMM pair**. A brand-new
+pump.fun bonding-curve token, pre-migration, usually isn't indexed yet —
+and per `listener.ts`'s own design note, that's often exactly when
+copy-trading a fast-moving wallet matters most. So:
+
+- `fomoValidationEnabled` defaults to **off**. Enabling it is a real
+  tradeoff, not a free safety upgrade: it will reliably validate momentum
+  on already-graduated/Raydium-pooled tokens, but will either skip or
+  (if `momentumFailOpenOnNoData=true`) blindly let through pre-migration
+  pump.fun entries, depending on how you set `momentumFailOpenOnNoData`.
+- The mint/freeze-authority and Token-2022 transfer-fee safety checks
+  inside `momentum.ts` run regardless of Dexscreener data availability —
+  only the price/volume/liquidity thresholds depend on it.
+- Volume surge is an *approximation*: Dexscreener exposes cumulative
+  volume for m5/h1 windows, not a true rolling 30-minute average, so
+  `minVolumeSurgeMultiple` compares current 5-minute volume against the
+  steady-state 5-minute rate implied by the last hour (`h1Volume / 12`).
+  See the comment above `computeVolumeSurgeMultiple` in `momentum.ts` for
+  the exact bias this introduces.
 
 ## Before you run this with real money
 
@@ -118,7 +170,10 @@ See `.env.example` for the full list. The ones that matter most:
 | `MIN_LIQUIDITY_SOL` / `MAX_PRICE_IMPACT_PCT` | Execution guard: refuses a trade if a probe swap of this size would move price more than this. |
 | `MAX_SAFE_WALLET_SOL` | Startup warning threshold — not a hard block. |
 | `JITO_BLOCK_ENGINE_URL` | Set to submit via Jito bundles instead of your RPC directly. |
-| Stop-loss / take-profit | UI-managed only (no `.env` var) — off by default. Independently exits a position on % loss/gain vs. cost basis, checked every ~15s while the bot is running. See the website's settings panel. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `DISCORD_WEBHOOK_URL` | Optional trade-alert webhooks (`notifier.ts`). Either, both, or neither. |
+| Position sizing mode | UI-managed (no `.env` var) — `"proportional"` (default, existing `%`-of-balance behavior) or `"fixed"` (always spends `BUY_SOL_CAP` per trade regardless of the target's own size). |
+| FOMO validation | UI-managed — off by default. Price velocity / volume surge / liquidity floor / mint & Token-2022-tax safety gate before every mirrored buy. See "FOMO validation: the tradeoff" above before enabling. |
+| Stop-loss / take-profit / trailing stop / TP laddering / time limit | UI-managed — all off by default. Independent exit mechanisms checked every ~15s while the bot is running. See the website's settings panel. |
 
 ## What this doesn't do
 
@@ -129,3 +184,14 @@ See `.env.example` for the full list. The ones that matter most:
   built for a single operator running their own bot wallet.
 - No backtesting harness. Validate target-wallet selection and sizing
   parameters in `DRY_RUN` mode against real live activity before going live.
+- The new fields (FOMO thresholds, sizing mode, trailing stop, TP ladders,
+  time limit) are all live via `GET`/`PUT /api/settings` today, but the
+  existing website settings panel (`frontend/src/components/
+  CopyTraderSettingsPanel.tsx`) hasn't been updated with controls for them
+  yet — until then, set them with `curl`/Postman against the control API,
+  e.g.:
+  ```bash
+  curl -X PUT http://localhost:8787/api/settings \
+    -H "Content-Type: application/json" \
+    -d '{"fomoValidationEnabled": true, "minPriceChangePct": 8, "positionSizingMode": "fixed"}'
+  ```
