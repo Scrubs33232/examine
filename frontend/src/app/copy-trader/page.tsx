@@ -204,6 +204,52 @@ export default function CopyTraderPage() {
 
         {status && (
           <>
+            {(status.targetWallets.length === 0 || status.status !== "running") && (
+              <div className="mb-6 rounded-2xl border border-accent/30 bg-accent/5 p-5">
+                <h2 className="mb-3 font-mono text-xs uppercase tracking-widest text-accent">Quick setup</h2>
+                <ol className="space-y-2.5">
+                  <li className="flex items-start gap-2.5 font-mono text-xs">
+                    <span
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px] ${
+                        status.targetWallets.length > 0
+                          ? "border-bull bg-bull/20 text-bull"
+                          : "border-muted text-muted"
+                      }`}
+                    >
+                      {status.targetWallets.length > 0 ? "✓" : "1"}
+                    </span>
+                    <span className={status.targetWallets.length > 0 ? "text-muted line-through" : "text-foreground"}>
+                      Add at least one wallet to watch, in the &ldquo;Target Wallets&rdquo; section below.
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2.5 font-mono text-xs">
+                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-muted text-[9px] text-muted">
+                      2
+                    </span>
+                    <span className="text-foreground">
+                      Optional: adjust buy size and risk limits in{" "}
+                      <a href="#settings" className="text-accent hover:underline">
+                        Settings ↓
+                      </a>{" "}
+                      — sensible defaults are already filled in.
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2.5 font-mono text-xs">
+                    <span
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px] ${
+                        status.status === "running" ? "border-bull bg-bull/20 text-bull" : "border-muted text-muted"
+                      }`}
+                    >
+                      {status.status === "running" ? "✓" : "3"}
+                    </span>
+                    <span className={status.status === "running" ? "text-muted line-through" : "text-foreground"}>
+                      Hit Start below. Stays in Dry Run (simulated) until you turn it off in Settings.
+                    </span>
+                  </li>
+                </ol>
+              </div>
+            )}
+
             <div className="mb-6 rounded-2xl border border-border bg-surface p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="font-mono text-xs uppercase tracking-widest text-muted">Status</h2>

@@ -88,7 +88,7 @@ export default function CopyTraderSettingsPanel() {
   }
 
   return (
-    <div className="mb-6 rounded-2xl border border-border bg-surface p-5">
+    <div id="settings" className="mb-6 scroll-mt-6 rounded-2xl border border-border bg-surface p-5">
       <h2 className="mb-1 font-mono text-xs uppercase tracking-widest text-muted">Copy Trading Settings</h2>
       <p className="mb-4 font-mono text-[10px] text-muted">
         Takes effect on the next detected trade — no restart needed. Everything below stays local to the bot;
@@ -129,93 +129,103 @@ export default function CopyTraderSettingsPanel() {
         <NumberField label="Buy cap" value={settings.buySolCap} onChange={(v) => patch({ buySolCap: v })} step={0.01} suffix="SOL" />
         <NumberField label="Fee buffer" value={settings.feeBufferSol} onChange={(v) => patch({ feeBufferSol: v })} step={0.01} suffix="SOL" />
         <NumberField label="Slippage" value={settings.slippageBps} onChange={(v) => patch({ slippageBps: v })} step={10} suffix="bps" />
-        <NumberField
-          label="Min liquidity probe"
-          value={settings.minLiquiditySol}
-          onChange={(v) => patch({ minLiquiditySol: v })}
-          step={0.5}
-          suffix="SOL"
-        />
-        <NumberField
-          label="Max price impact"
-          value={settings.maxPriceImpactPct}
-          onChange={(v) => patch({ maxPriceImpactPct: v })}
-          step={1}
-          suffix="%"
-        />
-        <NumberField
-          label="Wallet balance warning"
-          value={settings.maxSafeWalletSol}
-          onChange={(v) => patch({ maxSafeWalletSol: v })}
-          step={0.5}
-          suffix="SOL"
-        />
-        <NumberField
-          label="Priority fee percentile"
-          value={settings.priorityFeePercentile}
-          onChange={(v) => patch({ priorityFeePercentile: v })}
-          step={5}
-          suffix="pct"
-        />
-        <NumberField label="Jito tip" value={settings.jitoTipSol} onChange={(v) => patch({ jitoTipSol: v })} step={0.0001} suffix="SOL" />
       </div>
 
-      <label className="mt-3 block">
-        <span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Jito block engine URL (blank = submit via RPC directly)
-        </span>
-        <input
-          value={settings.jitoBlockEngineUrl}
-          onChange={(e) => patch({ jitoBlockEngineUrl: e.target.value })}
-          placeholder="https://mainnet.block-engine.jito.wtf"
-          className="w-full rounded-lg border border-border bg-surface-raised px-2 py-1.5 font-mono text-xs text-foreground placeholder:text-muted focus:outline-none"
-        />
-      </label>
+      <details className="group mt-5 border-t border-border pt-4">
+        <summary className="flex cursor-pointer list-none items-center justify-between font-mono text-xs text-muted hover:text-foreground">
+          <span>Advanced settings</span>
+          <span className="text-[10px] transition group-open:rotate-180">▾</span>
+        </summary>
 
-      <div className="mt-5 border-t border-border pt-4">
-        <div className="mb-3 flex items-center justify-between">
-          <div>
-            <div className="font-mono text-xs text-foreground">Prioritize wallets that make you the most</div>
-            <div className="font-mono text-[10px] text-muted">
-              Scales buy size up for target wallets with a stronger realized track record, down for weaker
-              ones. See the Performance panel below for what each wallet is currently scored at.
-            </div>
-          </div>
-          <button
-            onClick={() => patch({ walletPriorityEnabled: !settings.walletPriorityEnabled })}
-            className={`shrink-0 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-wider ${
-              settings.walletPriorityEnabled ? "border-bull-dim bg-bull-bg text-bull" : "border-border bg-surface-raised text-muted"
-            }`}
-          >
-            {settings.walletPriorityEnabled ? "On" : "Off"}
-          </button>
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <NumberField
+            label="Min liquidity probe"
+            value={settings.minLiquiditySol}
+            onChange={(v) => patch({ minLiquiditySol: v })}
+            step={0.5}
+            suffix="SOL"
+          />
+          <NumberField
+            label="Max price impact"
+            value={settings.maxPriceImpactPct}
+            onChange={(v) => patch({ maxPriceImpactPct: v })}
+            step={1}
+            suffix="%"
+          />
+          <NumberField
+            label="Wallet balance warning"
+            value={settings.maxSafeWalletSol}
+            onChange={(v) => patch({ maxSafeWalletSol: v })}
+            step={0.5}
+            suffix="SOL"
+          />
+          <NumberField
+            label="Priority fee percentile"
+            value={settings.priorityFeePercentile}
+            onChange={(v) => patch({ priorityFeePercentile: v })}
+            step={5}
+            suffix="pct"
+          />
+          <NumberField label="Jito tip" value={settings.jitoTipSol} onChange={(v) => patch({ jitoTipSol: v })} step={0.0001} suffix="SOL" />
         </div>
 
-        {settings.walletPriorityEnabled && (
-          <div className="grid grid-cols-3 gap-3">
-            <NumberField
-              label="Min closed trades"
-              value={settings.walletPriorityMinTrades}
-              onChange={(v) => patch({ walletPriorityMinTrades: v })}
-              step={1}
-            />
-            <NumberField
-              label="Min multiplier"
-              value={settings.walletPriorityMinMultiplier}
-              onChange={(v) => patch({ walletPriorityMinMultiplier: v })}
-              step={0.1}
-              suffix="×"
-            />
-            <NumberField
-              label="Max multiplier"
-              value={settings.walletPriorityMaxMultiplier}
-              onChange={(v) => patch({ walletPriorityMaxMultiplier: v })}
-              step={0.1}
-              suffix="×"
-            />
+        <label className="mt-3 block">
+          <span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
+            Jito block engine URL (blank = submit via RPC directly)
+          </span>
+          <input
+            value={settings.jitoBlockEngineUrl}
+            onChange={(e) => patch({ jitoBlockEngineUrl: e.target.value })}
+            placeholder="https://mainnet.block-engine.jito.wtf"
+            className="w-full rounded-lg border border-border bg-surface-raised px-2 py-1.5 font-mono text-xs text-foreground placeholder:text-muted focus:outline-none"
+          />
+        </label>
+
+        <div className="mt-5">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="font-mono text-xs text-foreground">Prioritize wallets that make you the most</div>
+              <div className="font-mono text-[10px] text-muted">
+                Scales buy size up for target wallets with a stronger realized track record, down for weaker
+                ones. See the Performance panel below for what each wallet is currently scored at.
+              </div>
+            </div>
+            <button
+              onClick={() => patch({ walletPriorityEnabled: !settings.walletPriorityEnabled })}
+              className={`shrink-0 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-wider ${
+                settings.walletPriorityEnabled ? "border-bull-dim bg-bull-bg text-bull" : "border-border bg-surface-raised text-muted"
+              }`}
+            >
+              {settings.walletPriorityEnabled ? "On" : "Off"}
+            </button>
           </div>
-        )}
-      </div>
+
+          {settings.walletPriorityEnabled && (
+            <div className="grid grid-cols-3 gap-3">
+              <NumberField
+                label="Min closed trades"
+                value={settings.walletPriorityMinTrades}
+                onChange={(v) => patch({ walletPriorityMinTrades: v })}
+                step={1}
+              />
+              <NumberField
+                label="Min multiplier"
+                value={settings.walletPriorityMinMultiplier}
+                onChange={(v) => patch({ walletPriorityMinMultiplier: v })}
+                step={0.1}
+                suffix="×"
+              />
+              <NumberField
+                label="Max multiplier"
+                value={settings.walletPriorityMaxMultiplier}
+                onChange={(v) => patch({ walletPriorityMaxMultiplier: v })}
+                step={0.1}
+                suffix="×"
+              />
+            </div>
+          )}
+        </div>
+      </details>
 
       <div className="mt-5 border-t border-border pt-4">
         <div className="mb-3 flex items-center justify-between">
